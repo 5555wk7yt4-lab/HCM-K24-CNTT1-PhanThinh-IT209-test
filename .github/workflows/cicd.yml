@@ -1,9 +1,9 @@
-
 name: CI/CD Deploy VPS
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -15,57 +15,72 @@ concurrency:
 
 jobs:
   ci:
+    name: Test and Build
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Backend tests
-        working-directory: backend
+          cache: gradle
+
+      - name: Run backend tests
         run: |
           chmod +x gradlew
           ./gradlew test --no-daemon
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Frontend lint and build
-        working-directory: frontend
+
+      - name: Validate Docker build
         run: |
-          npm ci
-          npm run lint
-          npm run build
-      - name: Validate Docker builds
-        run: |
-          docker build --target backend -t campus-hub-backend:ci .
-          docker build --target frontend -t campus-hub-frontend:ci .
+          docker build -t campus-hub-backend:ci .
 
   deploy:
+    name: Deploy to VPS
     needs: ci
     runs-on: ubuntu-latest
+
     steps:
-      - name: Deploy via SSH password
+      - name: Deploy via SSH key
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || '22' }}
+          fingerprint: ${{ secrets.VPS_FINGERPRINT }}
           command_timeout: 30m
+
           script: |
             set -eu
+
+            REPO="https://github.com/5555wk7yt4-lab/HCM-K24-CNTT1-PhanThinh-IT209-test.git"
             APP_DIR="$HOME/campus-hub-base"
+
             if [ ! -d "$APP_DIR/.git" ]; then
-              git clone https://github.com/dinhthanhnam/campus-hub-base.git "$APP_DIR"
+              git clone "$REPO" "$APP_DIR"
             fi
+
             cd "$APP_DIR"
+
+            git remote set-url origin "$REPO"
             git fetch origin main
             git checkout -B main origin/main
-            test -f .env || { echo 'Missing .env on VPS (DB_PASSWORD, MYSQL_ROOT_PASSWORD)'; exit 1; }
+
+            if [ ! -f .env ]; then
+              echo "ERROR: Missing .env on VPS"
+              exit 1
+            fi
+
             docker compose config --quiet
-            docker compose up -d --build --remove-orphans
+
+            docker compose up -d \
+              --build \
+              --remove-orphans
+
             docker compose ps
+
+            docker image prune -f
